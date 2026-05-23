@@ -1,0 +1,138 @@
+# inventory.yaml - Source of truth for everything: OSPF, floating
+# statics, HSRP. Adding a feature means editing here, not the scripts.
+
+devices:
+  R1:
+    host: 192.168.255.10
+    username: admin
+    password: cisco123
+    device_type: cisco_xe
+    ospf:
+      process_id: 1
+      router_id: 1.1.1.1
+    interfaces:
+      - name: Loopback0
+        ip: 1.1.1.1
+        mask: 255.255.255.255
+        ospf_area: 0
+      - name: Ethernet0/1
+        ip: 10.0.12.1
+        mask: 255.255.255.252
+        description: To R2
+        ospf_area: 0
+      - name: Ethernet0/2
+        ip: 10.0.13.1
+        mask: 255.255.255.252
+        description: To R3
+        ospf_area: 0
+    # Floating static routes - backup paths used only if OSPF fails.
+    # AD 120 (just above OSPF's 110) keeps these dormant under OSPF
+    # but activates them the moment OSPF withdraws.
+    floating_static_routes:
+      - destination: 2.2.2.2
+        mask: 255.255.255.255
+        next_hop: 10.0.12.2
+        ad: 120
+      - destination: 3.3.3.3
+        mask: 255.255.255.255
+        next_hop: 10.0.13.3
+        ad: 120
+
+  R2:
+    host: 192.168.255.11
+    username: admin
+    password: cisco123
+    device_type: cisco_xe
+    ospf:
+      process_id: 1
+      router_id: 2.2.2.2
+    interfaces:
+      - name: Loopback0
+        ip: 2.2.2.2
+        mask: 255.255.255.255
+        ospf_area: 0
+      - name: Ethernet0/0
+        ip: 10.0.12.2
+        mask: 255.255.255.252
+        description: To R1
+        ospf_area: 0
+      - name: Ethernet0/1
+        ip: 10.0.23.2
+        mask: 255.255.255.252
+        description: To R3 (peer)
+        ospf_area: 0
+    floating_static_routes:
+      - destination: 1.1.1.1
+        mask: 255.255.255.255
+        next_hop: 10.0.12.1
+        ad: 120
+      - destination: 3.3.3.3
+        mask: 255.255.255.255
+        next_hop: 10.0.23.3
+        ad: 120
+    # HSRP on the physical Ethernet0/2 interface (link to SW1).
+    # R2 is PRIMARY (priority 110). R3 is STANDBY (priority 100).
+    # If R2 fails, R3 takes over VIP 192.168.10.1 within seconds.
+    hsrp_interfaces:
+      - name: Ethernet0/2
+        ip: 192.168.10.2
+        mask: 255.255.255.0
+        description: To SW1 (HSRP segment)
+        hsrp:
+          group: 10
+          vip: 192.168.10.1
+          priority: 110      # Higher than R3 -> Active
+          preempt: true
+
+  R3:
+    host: 192.168.255.12
+    username: admin
+    password: cisco123
+    device_type: cisco_xe
+    ospf:
+      process_id: 1
+      router_id: 3.3.3.3
+    interfaces:
+      - name: Loopback0
+        ip: 3.3.3.3
+        mask: 255.255.255.255
+        ospf_area: 0
+      - name: Ethernet0/0
+        ip: 10.0.13.3
+        mask: 255.255.255.252
+        description: To R1
+        ospf_area: 0
+      - name: Ethernet0/1
+        ip: 10.0.23.3
+        mask: 255.255.255.252
+        description: To R2 (peer)
+        ospf_area: 0
+    floating_static_routes:
+      - destination: 1.1.1.1
+        mask: 255.255.255.255
+        next_hop: 10.0.13.1
+        ad: 120
+      - destination: 2.2.2.2
+        mask: 255.255.255.255
+        next_hop: 10.0.23.2
+        ad: 120
+    # R3 is STANDBY (priority 100). Sits idle until R2 fails.
+    hsrp_interfaces:
+      - name: Ethernet0/2
+        ip: 192.168.10.3
+        mask: 255.255.255.0
+        description: To SW1 (HSRP segment)
+        hsrp:
+          group: 10
+          vip: 192.168.10.1
+          priority: 100      # Lower than R2 -> Standby
+          preempt: true
+
+  SW1:
+    host: 192.168.255.13
+    username: admin
+    password: cisco123
+    device_type: cisco_xe
+    # SW1 is a transparent L2 switch between R2 and R3.
+    # No OSPF, no floating statics, no HSRP - bootstrap config (VLAN 99
+    # mgmt SVI) is sufficient. Audited for state but not configured.
