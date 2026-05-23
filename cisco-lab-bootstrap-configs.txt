@@ -1,6 +1,4 @@
 # Bootstrap configs - paste into each device after the lab boots
-# Updated: static management IPs, R4 removed, descriptions match the
-# simplified no-VLAN HSRP design (HSRP runs on physical interfaces).
 
 How to use:
   1. Start the lab in CML.
