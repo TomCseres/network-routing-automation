@@ -142,3 +142,47 @@ This eliminates the smart-quote pasting problem (no copy-paste needed at all), k
 - **Laptop (persistent):** real Git credential helper (`credential.helper store` or libsecret-backed). PAT entered once, cached securely, no need to embed in URLs.
 
 **Lesson:** ephemeral and persistent storage need different credential patterns. URL-embedded for one-shot use; credential helpers for durable workstations. Don't use the same pattern on both — the laptop deserves better than what Alpine has to settle for.
+
+---
+
+## Day 3 — Inventory and Multi-Device Audit
+
+### Why YAML for the inventory
+
+Chose YAML over JSON or TOML for `inventory.yaml`. YAML allows inline comments (so the AD-120 rationale lives right next to the routes it explains), produces clean git diffs (one changed value = one changed line), and has minimal syntax noise compared to JSON's brackets and quotes. The whole network design — devices, interfaces, OSPF areas, floating statics, HSRP groups — is declared as data in one human-readable file.
+
+**Lesson:** the inventory file *is* the design. Every script in Days 4–8 reads from it; change a value once and every script picks it up. Picking a format that humans can read and review pays off across the whole project.
+
+### Floating static AD 120 — close backup, not deep backup
+
+Configured the floating static routes with administrative distance 120, just above OSPF's 110. This keeps them dormant while OSPF is healthy (lower AD wins) but activates them the instant OSPF withdraws a route. AD 200 would be a more conservative "deep backup"; AD 120 is a deliberate "close backup" choice so failover is near-immediate. Worth noting: 120 happens to be RIP's default AD too — irrelevant here since there's no RIP, but the kind of overlap an interviewer might probe.
+
+**Lesson:** administrative distance is a design lever, not a fixed value. The number you pick encodes how aggressively the backup takes over.
+
+### The empty-output idiom in retrieve_info.py
+
+Used `(output if output.strip() else '(default message)')` so that a device returning nothing prints `(OSPF not running)` rather than a confusing blank section. Small touch, big difference in readability — especially when comparing the Day 3 "before" snapshot to the Day 8 "after."
+
+**Lesson:** scripts that print state should make "nothing here" explicit, not silent. A blank section looks like a bug; "(no HSRP groups)" looks like an answer.
+
+### `rm -rf *` then `git pull` does not restore deleted files
+
+Wiped the working directory with `rm -rf *` (the glob doesn't match `.git/`, so history survived) expecting `git pull` to re-download everything. It didn't — pull only applied the diff of the latest commit (two new files), leaving the rest deleted. `git status` showed them all as `deleted`.
+
+Fix: `git restore .` reconciles the working directory back to HEAD, bringing every tracked file back.
+
+**Lesson:** the working directory and git history are two separate things. `git pull` adds *changes*; it doesn't re-checkout missing files. `git restore .` is the tool to make the working directory match HEAD again.
+
+### venv activation does not survive a subshell
+
+Ran `retrieve_info.py` and hit `ModuleNotFoundError: No module named 'yaml'` even though the bootstrap script had installed PyYAML. Cause: the bootstrap script had been *executed* (`./alpine-bootstrap.sh`), so its `. .venv/bin/activate` ran in a subshell that died when the script ended. The interactive shell never had the venv active. `which python3` confirmed it was pointing at `/usr/bin/python3`, not the venv.
+
+Fix: activate the venv in the current shell (`. .venv/bin/activate`), or source the bootstrap script (`. ./alpine-bootstrap.sh`) instead of executing it.
+
+**Lesson:** when a script needs to change the parent shell's environment (cd, export, activating a venv), it must be *sourced* (`. ./script.sh`), not *executed* (`./script.sh`). Execution runs in a subshell that can't reach back into the parent.
+
+### The read-only audit doubles as a pre-flight health check
+
+The first full run of `retrieve_info.py` returned `[ERROR] TCP connection to device failed` for R2 while the other three devices responded cleanly. R2 pinged fine (ICMP) but its SSH was dead (TCP 22) — the same unsaved-crypto-keys issue from Day 2, this time on R2. Regenerating the keys and `write memory` fixed it; the re-run returned clean output for all four.
+
+**Lesson:** a read-only audit script isn't just for snapshots — it's a pre-flight health check. It surfaced a broken device *before* any configuration automation ran against it. Catching that with a safe read-only tool is far better than discovering it mid-config-push.
