@@ -9,7 +9,7 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
 - Day 1 — project skeleton, dependencies pinned ✓
 - Day 2 — first netmiko connection (`hello_router.py`) ✓
 - Day 3 — inventory.yaml + multi-device audit (`retrieve_info.py`) ✓
-- Day 4 — `configure_ospf.py` (single-device OSPF push) *(planned)*
+- Day 4 — `configure_ospf.py` (single-device OSPF push) ✓
 - Day 5 — `configure_ospf_multi.py` (parallel, idempotent across all routers) *(planned)*
 - Day 6 — `configure_floating_routes.py` (AD 120 backup paths) *(planned)*
 - Day 7 — `configure_hsrp.py` (first-hop redundancy) *(planned)*
@@ -65,11 +65,12 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
 | `inventory.yaml` | Source of truth — every device, interface, OSPF area, floating static, HSRP group |
 | `hello_router.py` | First netmiko connectivity test (Day 2) |
 | `retrieve_info.py` | Read-only multi-device audit (Day 3) |
+| `configure_ospf.py` | Single-device OSPF push to R1 — proof of concept (Day 4) |
 | `requirements.txt` | Pinned Python dependencies |
 | `.gitignore` | venv and bytecode exclusions |
 | `NOTES.md` | Engineering journal — design choices, gotchas, lessons |
 
-(More files arrive on Days 4 through 8.)
+(More files arrive on Days 5 through 8.)
 
 ## How to run (current state)
 
@@ -80,13 +81,17 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
    ```
    cd ~/network-routing-automation && python3 hello_router.py
    ```
-5. Run the full read-only audit across all four devices:
+5. Run the full read-only audit across all four devices (the "before" baseline):
    ```
    python3 retrieve_info.py
    ```
-   Expected (pre-automation) output: every device shows `(OSPF not running)` and `(no HSRP groups)` — the "before" baseline.
+6. Push OSPF config to R1 and verify it took:
+   ```
+   python3 configure_ospf.py
+   ```
+   R1's OSPF process comes up (router-id 1.1.1.1, interfaces in area 0). Re-running `retrieve_info.py` now shows R1's OSPF section change from `(OSPF not running)` to a live process — the same audit tool doubling as before/after proof.
 
-Days 4 onward extend this baseline with OSPF, floating static routes, and HSRP automation.
+Days 5 onward scale OSPF to all routers, then add floating static routes and HSRP.
 
 ## License
 

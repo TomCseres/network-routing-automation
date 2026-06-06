@@ -186,3 +186,37 @@ Fix: activate the venv in the current shell (`. .venv/bin/activate`), or source 
 The first full run of `retrieve_info.py` returned `[ERROR] TCP connection to device failed` for R2 while the other three devices responded cleanly. R2 pinged fine (ICMP) but its SSH was dead (TCP 22) — the same unsaved-crypto-keys issue from Day 2, this time on R2. Regenerating the keys and `write memory` fixed it; the re-run returned clean output for all four.
 
 **Lesson:** a read-only audit script isn't just for snapshots — it's a pre-flight health check. It surfaced a broken device *before* any configuration automation ran against it. Catching that with a safe read-only tool is far better than discovering it mid-config-push.
+
+---
+
+## Day 4 — First OSPF Push (Single Router)
+
+### send_config_set (config mode) vs send_command (exec mode)
+
+`configure_ospf.py` was the first script to *change* a device rather than just read it. It uses netmiko's `send_config_set(cmds)`, which enters config mode, sends every command in order, and exits config mode automatically. This is a different method from `send_command()` (used in Days 2–3), which runs a single command in exec mode. Mixing them up fails: `send_command("interface Ethernet0/1")` does nothing useful from exec mode, and `send_config_set(["show version"])` errors inside config mode.
+
+**Lesson:** netmiko has two distinct entry points for two distinct IOS modes. Match the method to the mode — config changes go through `send_config_set`, show commands through `send_command`.
+
+### save_config() is netmiko's "write memory"
+
+After the push, the script calls `conn.save_config()` — netmiko's equivalent of `write memory`. Without it, the config lands in the running-config (active now) but never reaches the startup-config (gone on reload). Given how many times unsaved state has already bitten this project (SSH keys on Days 2 and 3), saving after every config push is non-negotiable.
+
+**Lesson:** a config push isn't finished until it's saved. running-config ≠ startup-config. The automation must save explicitly, every time.
+
+### OSPF WAIT → DR transition with no neighbors
+
+Immediately after the push, `show ip ospf interface brief` showed Et0/1 and Et0/2 in State **WAIT**. A few minutes later (from R1's console) the same interfaces showed State **DR**, still with **Nbrs 0/0**. With no OSPF neighbors yet (R2/R3 don't run OSPF until Day 5), R1's wait timer expired and it elected *itself* Designated Router on each multi-access segment. Loopback0 stayed **LOOP** (loopbacks don't form adjacencies).
+
+**Lesson:** OSPF interface states progress on their own timers even with zero neighbors. WAIT is the initial wait for the dead interval; DR is self-election when no higher-priority neighbor shows up. Reading these states tells you exactly where in the OSPF state machine an interface is — useful for diagnosing "why no adjacency?" later.
+
+### The management interface is deliberately excluded from the push
+
+R1's Ethernet0/0 (mgmt, 192.168.255.10) is intentionally absent from inventory.yaml's `interfaces` block, so `configure_ospf.py` never touches it. This matters because the script connects *over* that interface. Re-IPing or shutting it mid-push would sever the SSH session and strand the device. Only the OSPF-participating interfaces — Loopback0, Ethernet0/1, Ethernet0/2 — get configured.
+
+**Lesson:** never let automation reconfigure the path it's riding on. Exclude the management interface from any bulk interface push, or you'll cut your own connection and lock yourself out.
+
+### The audit script doubles as before/after evidence
+
+Re-ran the unchanged Day 3 `retrieve_info.py` after the OSPF push. R1's OSPF section flipped from `(OSPF not running)` to `Routing Process "ospf 1" with ID 1.1.1.1`. Same script, same command, different output — because the network changed in between.
+
+**Lesson:** a good read-only audit tool is also the before/after proof. No separate verification tooling needed — the same script tells the whole story across the project timeline, which makes the portfolio writeup's "before vs after" trivial to assemble.
