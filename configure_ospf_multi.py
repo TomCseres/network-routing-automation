@@ -65,6 +65,27 @@ def build_commands(device_params):
     return cmds
 
 
+def find_ios_errors(output):
+    """
+    Scan device output for IOS error lines.
+
+    send_config_set() does NOT raise when a device rejects a command - the
+    device just prints a '% ...' line and moves on. Without this check a
+    rejected command (e.g. 'Bad mask /30 for address ...') would be reported
+    as a successful push. We treat any line starting with '%' as an error,
+    skipping the benign 'OSPF will not operate' notice, which is a downstream
+    symptom whose real cause (the bad address) is already captured.
+    """
+    errors = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("%"):
+            if "OSPF will not operate" in stripped:
+                continue
+            errors.append(stripped)
+    return errors
+
+
 def configure_one(name, params):
     """
     Configure OSPF on one device. Returns a (name, status) tuple and
@@ -88,7 +109,15 @@ def configure_one(name, params):
                 return (name, "OK - no changes (idempotent)")
 
             cmds = build_commands(params)
-            conn.send_config_set(cmds)
+            output = conn.send_config_set(cmds)
+
+            # send_config_set won't raise on a rejected command - the device
+            # just prints '% ...' and continues. Scan for those so a silent
+            # rejection is reported as REJECTED, not a misleading CONFIGURED.
+            errors = find_ios_errors(output)
+            if errors:
+                return (name, f"REJECTED - device error: {errors[0]}")
+
             conn.save_config()
             return (name, f"CONFIGURED - {len(cmds)} commands sent")
 

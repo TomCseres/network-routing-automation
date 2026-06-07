@@ -201,13 +201,13 @@ The first full run of `retrieve_info.py` returned `[ERROR] TCP connection to dev
 
 After the push, the script calls `conn.save_config()` — netmiko's equivalent of `write memory`. Without it, the config lands in the running-config (active now) but never reaches the startup-config (gone on reload). Given how many times unsaved state has already bitten this project (SSH keys on Days 2 and 3), saving after every config push is non-negotiable.
 
-**Lesson:** a config push isn't finished until it's saved. running-config ≠ startup-config. The automation must save explicitly, every time.
+**Lesson:** a config push isn't finished until it's saved. running-config != startup-config. The automation must save explicitly, every time.
 
-### OSPF WAIT → DR transition with no neighbors
+### OSPF WAIT -> DR transition with no neighbors
 
-Immediately after the push, `show ip ospf interface brief` showed Et0/1 and Et0/2 in State **WAIT**. A few minutes later (from R1's console) the same interfaces showed State **DR**, still with **Nbrs 0/0**. With no OSPF neighbors yet (R2/R3 don't run OSPF until Day 5), R1's wait timer expired and it elected *itself* Designated Router on each multi-access segment. Loopback0 stayed **LOOP** (loopbacks don't form adjacencies).
+Immediately after the push, `show ip ospf interface brief` showed Et0/1 and Et0/2 in State WAIT. A few minutes later (from R1's console) the same interfaces showed State DR, still with Nbrs 0/0. With no OSPF neighbors yet (R2/R3 don't run OSPF until Day 5), R1's wait timer expired and it elected itself Designated Router on each multi-access segment. Loopback0 stayed LOOP (loopbacks don't form adjacencies).
 
-**Lesson:** OSPF interface states progress on their own timers even with zero neighbors. WAIT is the initial wait for the dead interval; DR is self-election when no higher-priority neighbor shows up. Reading these states tells you exactly where in the OSPF state machine an interface is — useful for diagnosing "why no adjacency?" later.
+**Lesson:** OSPF interface states progress on their own timers even with zero neighbors. WAIT is the initial wait for the dead interval; DR is self-election when no higher-priority neighbor shows up. Reading these states tells you exactly where in the OSPF state machine an interface is.
 
 ### The management interface is deliberately excluded from the push
 
@@ -219,4 +219,53 @@ R1's Ethernet0/0 (mgmt, 192.168.255.10) is intentionally absent from inventory.y
 
 Re-ran the unchanged Day 3 `retrieve_info.py` after the OSPF push. R1's OSPF section flipped from `(OSPF not running)` to `Routing Process "ospf 1" with ID 1.1.1.1`. Same script, same command, different output — because the network changed in between.
 
-**Lesson:** a good read-only audit tool is also the before/after proof. No separate verification tooling needed — the same script tells the whole story across the project timeline, which makes the portfolio writeup's "before vs after" trivial to assemble.
+**Lesson:** a good read-only audit tool is also the before/after proof. No separate verification tooling needed — the same script tells the whole story across the project timeline.
+
+---
+
+## Day 5 — Multi-Device OSPF + Idempotency
+
+### Idempotency: read state first, change only if needed
+
+`configure_ospf_multi.py` checks each device's current OSPF state before touching it. `needs_configuration()` returns False if OSPF is already running and every expected interface is already in OSPF, so a second run is a no-op. This is the behavior that separates a script from a tool: it's safe to run repeatedly, the way Ansible or Terraform reconcile to a desired state rather than blindly re-applying.
+
+**Lesson:** idempotency isn't a nice-to-have — it's what makes automation safe to run in production. "Check, then change" beats "always change."
+
+### The Et0/0 vs Ethernet0/0 abbreviation trap
+
+The idempotency check compares expected interface names against `show ip ospf interface brief`, but IOS prints names abbreviated (Ethernet0/0 -> Et0/0, Loopback0 -> Lo0). The check has to compare both forms; matching only the full name would make it think every interface was missing and re-push on every run — silently defeating the idempotency it was meant to provide.
+
+**Lesson:** when matching against device output, account for how the device actually formats it. Vendor abbreviations are a classic source of "why does my check always fail?" bugs.
+
+### The invalid /30 broadcast address that hid behind a "successful" push
+
+R3 reconfigured on every run even though the script reported "20 commands sent" each time. Root cause: inventory had R3's inter-router link IPs as `.3` — the broadcast address of each /30 — which IOS rejects with `Bad mask /30 for address 10.0.13.3`. The interface stayed `unassigned`, OSPF never came up on it (`% OSPF will not operate on this interface until IP is configured on it`), and the idempotency check correctly kept flagging R3 as needing configuration. Fixed to the two usable host addresses: 10.0.13.2 (To R1) and 10.0.23.1 (To R2).
+
+A /30 has 4 addresses, only 2 usable: network (.0), host, host, broadcast (.3). Assigning .0 or .3 to an interface is always invalid.
+
+**Lesson 1:** in a /30, only 2 of the 4 addresses are assignable. Network and broadcast are off-limits.
+**Lesson 2:** the idempotency check doubled as a *correctness* check. A fire-and-forget script would have reported success forever and shipped a topology where R3 silently wasn't in OSPF. Because the script re-evaluated real device state each run, it refused to go quiet about a device whose config "succeeded" but didn't take.
+
+### send_config_set does not raise on rejected commands
+
+The bug above stayed hidden because `send_config_set()` does not raise when a device rejects a command — IOS just prints a `% ...` line and continues. The script captured that output but only reported the command count, so "Bad mask /30" was invisible. Added a `find_ios_errors()` helper that scans the device output for lines starting with `%` and reports `REJECTED - device error: ...` instead of a misleading `CONFIGURED`. Now a silent rejection surfaces immediately in the status table.
+
+**Lesson:** a config-push tool that ignores device error output is lying to you. Always inspect what the device said back — netmiko hands you the output for a reason. Treating `%` lines as failures turns silent rejections into loud ones.
+
+### Errors as data: the (name, status) tuple in a parallel run
+
+`configure_one()` never raises — every outcome (skipped, no-change, configured, rejected, connection error) comes back as a `(name, status)` tuple. In a thread-pool run this is essential: one unreachable router returns an ERROR row instead of crashing the whole batch and leaving you unsure which devices actually got configured.
+
+**Lesson:** in concurrent code, let each worker return its outcome as data rather than throwing. One failure shouldn't take down the whole run or hide which units succeeded.
+
+### ThreadPoolExecutor for I/O-bound SSH work
+
+Devices are configured in parallel via `concurrent.futures.ThreadPoolExecutor`. SSH is I/O-bound — mostly waiting on the network — so threads overlap the waiting and the whole run finishes in about the time of the slowest single device, not the sum. Results print out of inventory order (whichever device finishes first prints first), which is itself visible proof the work ran in parallel. Threads (not asyncio) are the right tool here: netmiko is synchronous, and the GIL doesn't hurt when the threads spend their time blocked on network I/O.
+
+**Lesson:** match the concurrency model to the workload. I/O-bound + a synchronous library = threads. CPU-bound would want processes; neither needs the complexity of async here.
+
+### The WAIT/DR -> FULL transition, completed
+
+On Day 4, R1's OSPF interfaces sat in WAIT then self-elected DR with `Nbrs 0/0` — no one to talk to. After Day 5 brought R2 and R3 into OSPF (and after the /30 fix let R3's interfaces come up), `show ip ospf neighbor` showed both as FULL, and `show ip route ospf` showed R1 learning 2.2.2.2 and 3.3.3.3 dynamically, plus an equal-cost (ECMP) pair of paths to the R2-R3 link. The state machine I watched stall on Day 4 completed on its own once the topology was correct.
+
+**Lesson:** OSPF interface states tell a story across time. Reading them (WAIT -> DR -> FULL) turns "is it working?" into a precise diagnosis of exactly how far the protocol got.
