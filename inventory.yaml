@@ -98,7 +98,7 @@ devices:
         mask: 255.255.255.255
         ospf_area: 0
       - name: Ethernet0/0
-        ip: 10.0.13.3
+        ip: 10.0.13.2
         mask: 255.255.255.252
         description: To R1
         ospf_area: 0
