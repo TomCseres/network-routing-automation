@@ -269,3 +269,46 @@ Devices are configured in parallel via `concurrent.futures.ThreadPoolExecutor`. 
 On Day 4, R1's OSPF interfaces sat in WAIT then self-elected DR with `Nbrs 0/0` — no one to talk to. After Day 5 brought R2 and R3 into OSPF (and after the /30 fix let R3's interfaces come up), `show ip ospf neighbor` showed both as FULL, and `show ip route ospf` showed R1 learning 2.2.2.2 and 3.3.3.3 dynamically, plus an equal-cost (ECMP) pair of paths to the R2-R3 link. The state machine I watched stall on Day 4 completed on its own once the topology was correct.
 
 **Lesson:** OSPF interface states tell a story across time. Reading them (WAIT -> DR -> FULL) turns "is it working?" into a precise diagnosis of exactly how far the protocol got.
+
+---
+
+## Day 6 — Floating Static Routes + Failover Demo
+
+### Administrative distance is the entire failover mechanism
+
+Floating static routes back up OSPF using nothing but administrative distance. OSPF is AD 110; the floating statics are configured at AD 120. Lower AD wins, so while OSPF is healthy its route is installed and the static is invisible — configured but not in the routing table. When OSPF withdraws the route, the static becomes the best remaining path and installs automatically. No script decides this; IOS route-selection does, driven purely by the AD values in inventory.yaml.
+
+**Lesson:** administrative distance isn't just trivia — it's a live failover lever. Set the backup's AD just above the primary's and the failover is automatic and instant, with zero control logic to write or maintain.
+
+### Idempotency must check the running-config, not the routing table
+
+`configure_floating_routes.py` decides whether a route needs adding by matching against `show running-config | include ip route`, not against `show ip route`. That's deliberate: a dormant floating static is in the running-config but NOT in the routing table (OSPF's better route hides it). Checking the routing table would see the static "missing" every time and re-push it on every run — the same class of bug as Day 5's interface-name mismatch.
+
+**Lesson:** when writing an idempotency check, compare against the source of intent (configuration), not the current runtime effect (the active table). A correctly configured backup can be legitimately absent from the table.
+
+### Why break OSPF on the destination's owner, not shut a link
+
+In a triangle with full OSPF redundancy, shutting a single link doesn't trigger a floating static — OSPF just reconverges via the third router. To actually force R1's static to 2.2.2.2 to float up, OSPF has to lose the route entirely. Since 2.2.2.2 is R2's own loopback, disabling OSPF on R2 removes the only source of that route network-wide, and the static (via the still-up R1-R2 link) takes over.
+
+**Lesson:** to demo a backup path meaningfully, remove the primary's ability to reach the destination at all — don't just break one link in a redundant mesh, or the primary protocol quietly routes around it and the backup never engages.
+
+### The failover round trip: O → S → O, fully automatic
+
+Verified the complete cycle from R1's view of 2.2.2.2: OSPF active (`ospf 1`, distance 110) → break OSPF on R2 → static floats up (`static`, distance 120) with a 100% ping through the failure → restore OSPF → route reclaimed by OSPF (distance 110), static back to dormant. The switch each way happened on its own, driven by AD, with connectivity preserved.
+
+**Lesson:** "configured" and "tested" are different claims. Watching the route change type in both directions — and pinging through the failure — is the difference between saying a design is redundant and showing it.
+
+### `no router ospf 1` is more destructive than it looks — and the automation healed it
+
+To trigger the failover I removed OSPF from R2 with `no router ospf 1`. When I restored it with `router ospf 1` + `router-id 2.2.2.2`, the process came back but R1 never re-formed its adjacency — `show ip ospf neighbor` on R1 showed only R3. On R2, `show ip ospf interface brief` returned nothing: the OSPF process existed with zero interfaces. Root cause: `no router ospf 1` removes the process AND its per-interface associations. The interface `ip ospf 1 area 0` tags were gone, and re-adding just the process doesn't bring them back.
+
+Fix: re-ran `configure_ospf_multi.py`. The idempotency check found that only R2's expected OSPF interfaces were missing, reported `CONFIGURED - 20 commands sent` for R2, and left R1 and R3 as `OK - no changes`. The automation detected drift on exactly one device and remediated only that device.
+
+**Lesson 1:** `no router ospf 1` takes the interface OSPF assignments with it. Fully restoring OSPF means re-applying the interface tags, not just the process — a real gotcha when using OSPF removal as a failover trigger.
+**Lesson 2:** this is configuration enforcement in practice. A device drifted from its desired state and re-running the idempotent tool detected and repaired exactly that device, with no effect on the others. The same "check, then change" logic that makes re-runs safe makes recovery safe — the deployer doubles as a targeted repair mechanism.
+
+### Control-plane vs physical-path redundancy
+
+The floating static and the OSPF route here share the same next-hop (10.0.12.2, the direct R1-R2 link). So this backup covers a control-plane / protocol failure over an intact physical path — OSPF dies, the link is fine, the static keeps forwarding. That's a different failure domain from physical-path redundancy (where the backup uses a different link entirely). Worth naming the distinction: this design protects against OSPF/process failure, not against the R1-R2 cable going down.
+
+**Lesson:** know which failure your redundancy actually covers. Same-next-hop floating statics protect the control plane; protecting against a link failure needs a backup that routes over a different physical path.

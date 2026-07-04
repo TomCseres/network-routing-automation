@@ -11,7 +11,7 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
 - Day 3 — inventory.yaml + multi-device audit (`retrieve_info.py`) ✓
 - Day 4 — `configure_ospf.py` (single-device OSPF push) ✓
 - Day 5 — `configure_ospf_multi.py` (parallel, idempotent across all routers) ✓
-- Day 6 — `configure_floating_routes.py` (AD 120 backup paths) *(planned)*
+- Day 6 — `configure_floating_routes.py` (AD 120 backup paths) ✓
 - Day 7 — `configure_hsrp.py` (first-hop redundancy) *(planned)*
 - Day 8 — `verify_routing.py` + comprehensive documentation *(planned)*
 
@@ -72,6 +72,7 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
 | `retrieve_info.py` | Read-only multi-device audit (Day 3) |
 | `configure_ospf.py` | Single-device OSPF push to R1 — proof of concept (Day 4) |
 | `configure_ospf_multi.py` | Parallel, idempotent OSPF deployment across all routers (Day 5) |
+| `configure_floating_routes.py` | Parallel, idempotent floating static routes — AD 120 OSPF backup (Day 6) |
 | `requirements.txt` | Pinned Python dependencies |
 | `.gitignore` | venv and bytecode exclusions |
 | `NOTES.md` | Engineering journal — design choices, gotchas, lessons |
@@ -98,11 +99,22 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
    show ip route ospf         # learned O routes to 2.2.2.2 and 3.3.3.3
    ```
 
-Days 6 onward add floating static routes (OSPF backup) and HSRP (first-hop redundancy).
+Day 7 onward adds HSRP (first-hop redundancy) and end-to-end verification.
+
+## Verified behaviors
+
+This project is tested against real failures, not just deployed once and assumed working:
+
+- **Idempotency** — re-running any `configure_*` script reports `OK - no changes` when a device already matches the inventory. State is read before anything is changed, so only real drift is acted on.
+
+- **Failover (OSPF → floating static)** — while OSPF (AD 110) is healthy, the floating static (AD 120) stays dormant, configured but absent from the routing table. Disabling OSPF on R2 (which owns the 2.2.2.2 loopback) withdraws the OSPF route network-wide, and R1's floating static automatically floats up — the route to 2.2.2.2 changes from `ospf 1` / distance 110 to `static` / distance 120, with reachability preserved (100% ping through the failure). Restoring OSPF reclaims the route and the static returns to dormant. A full `O → S → O` round trip, driven entirely by administrative distance with no scripted decision-making.
+
+- **Drift detection & self-healing** — the failover demo surfaced a real operational gotcha: `no router ospf 1` also strips the per-interface `ip ospf` tags, so re-adding the OSPF process alone does not fully restore a router (R2's process came back with zero interfaces and no adjacencies). The fix was to re-run `configure_ospf_multi.py`: the idempotency check detected that **only R2** had drifted from its desired state, reconfigured just R2 (`CONFIGURED - 20 commands sent`), and left R1 and R3 untouched (`OK - no changes`). The same "check, then change" logic that makes deployments safe also makes recovery safe — the tool is both a deployer and a targeted repair mechanism.
 
 ## Releases
 
 - **v0.1.0** — OSPF deployed and verified across all routers (end of Day 5)
+- **v0.2.0** — Floating static backup layer deployed and failover-tested (end of Day 6)
 
 ## License
 
