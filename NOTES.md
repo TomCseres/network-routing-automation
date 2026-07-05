@@ -352,3 +352,37 @@ R3 didn't take over the instant R2's interface went down — it waited out the H
 OSPF and the floating statics protect the routing path between routers. HSRP protects the first hop — the gateway a host talks to. They're independent layers covering different failures: a host with a dead gateway can't send anything regardless of how healthy OSPF is upstream, and a perfectly reachable gateway is useless if the routing behind it has no path. This project layers all three: dynamic routing (OSPF), a routing backup (floating statics), and a gateway backup (HSRP).
 
 **Lesson:** redundancy isn't one thing. "The network is redundant" means naming which failures are covered at which layer. First-hop redundancy and path redundancy are different problems with different solutions, and a resilient design needs both.
+
+---
+
+## Day 8 — End-to-End Verification + v1.0.0 Release
+
+### An exit code is what turns a script into tooling
+
+verify_routing.py prints a human-readable PASS/FAIL table, but the part that matters to automation is the last line: sys.exit(0) if everything passed, sys.exit(1) if anything failed. That single integer is what lets the check gate a pipeline — `verify_routing.py && deploy_next` only proceeds on success. Without an exit code it's a report; with one it's a test.
+
+**Lesson:** if a check is meant to be used by other automation, it must return a machine-readable result, not just print one. The exit code is the contract between this script and whatever runs it.
+
+### Derive expected state from the inventory, don't hard-code it
+
+The checks compute what to expect from inventory.yaml rather than embedding assumptions. Expected OSPF neighbor count = the number of non-loopback OSPF interfaces (each inter-router link forms one adjacency). Expected HSRP roles = highest priority in each group is Active, the rest Standby. Change a priority or add a link in the inventory and the verification follows automatically — no code edit.
+
+**Lesson:** a verification tool that hard-codes "R2 is Active" rots the moment the design changes. Deriving expectations from the same source of truth the deploy scripts use keeps the check honest and maintenance-free.
+
+### The 'show standby brief' header trap
+
+The first cut of the HSRP check matched the word "Active" in `show standby brief` output — but that output has "Active" and "Standby" as *column headers*, so the substring was always present regardless of the real state, giving false passes for either role. Fixed by using verbose `show standby` and matching the line "State is Active" / "State is Standby", which only appears for the actual state.
+
+**Lesson:** when asserting against device output, match a string that's only present when the condition is true. Column headers, legends, and help text are always there — keying off them silently defeats the check. (Same family of bug as the Day 5 Et0/0 vs Ethernet0/0 mismatch: know exactly what the device prints.)
+
+### A health check is only credible if you watch it fail
+
+Ran the check green (all pass, exit 0), then shut the R1-R2 link and re-ran it. It reported OSPF FAIL with "1/2 neighbors FULL" on exactly R1 and R2 (the two ends of the link), left R3 green, kept STATIC and HSRP passing, and returned exit 1. Restoring the link brought it back to all-pass / exit 0. Proving the failure path is as important as proving the success path — a check that can't fail proves nothing.
+
+**Lesson:** test the test. Deliberately break the thing a monitor is supposed to catch and confirm it catches it, precisely and without false positives elsewhere. An always-green check is indistinguishable from a broken one until the day it matters.
+
+### The eight-day arc, in one comparison
+
+Day 3's baseline audit showed every device with "(OSPF not running)" and "(no HSRP groups)" — a network with a default route and nothing else. Day 8's verification shows OSPF 2/2 FULL, floating statics present, and HSRP Active/Standby across the board, validated by one command. Same lab, same inventory-driven tooling; the entire difference is what the automation deployed and proved in between.
+
+**Lesson:** keep the "before." The Day 3 read-only audit, captured before any change, became the single most compelling piece of evidence at the end — the contrast is the story. Baseline everything before you touch it.

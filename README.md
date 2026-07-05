@@ -13,7 +13,7 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
 - Day 5 — `configure_ospf_multi.py` (parallel, idempotent across all routers) ✓
 - Day 6 — `configure_floating_routes.py` (AD 120 backup paths) ✓
 - Day 7 — `configure_hsrp.py` (first-hop redundancy) ✓
-- Day 8 — `verify_routing.py` + comprehensive documentation *(planned)*
+- Day 8 — `verify_routing.py` + comprehensive documentation ✓
 
 ## Architecture
 
@@ -74,6 +74,7 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
 | `configure_ospf_multi.py` | Parallel, idempotent OSPF deployment across all routers (Day 5) |
 | `configure_floating_routes.py` | Parallel, idempotent floating static routes — AD 120 OSPF backup (Day 6) |
 | `configure_hsrp.py` | Parallel, idempotent HSRP first-hop redundancy — R2 Active / R3 Standby (Day 7) |
+| `verify_routing.py` | End-to-end health check across all three layers, with a pass/fail exit code (Day 8) |
 | `requirements.txt` | Pinned Python dependencies |
 | `.gitignore` | venv and bytecode exclusions |
 | `NOTES.md` | Engineering journal — design choices, gotchas, lessons |
@@ -100,7 +101,7 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
    show ip route ospf         # learned O routes to 2.2.2.2 and 3.3.3.3
    ```
 
-Day 8 ties all three layers into a single automated health check (`verify_routing.py`) with proper exit codes, plus the final documentation pass and v1.0.0 release.
+All three layers are validated together by `verify_routing.py`, which returns exit code 0 when the whole stack is healthy and 1 when any check fails — one command to gate a change or a pipeline.
 
 ## Verified behaviors
 
@@ -114,12 +115,29 @@ This project is tested against real failures, not just deployed once and assumed
 
 - **First-hop failover (HSRP)** — on the 192.168.10.0/24 segment, R2 (priority 110) is Active and R3 (priority 100) is Standby, sharing virtual gateway 192.168.10.1. Exactly one router is Active — confirming R2 and R3 exchange HSRP hellos through the transparent-L2 SW1. Shutting the Active router's interface promotes R3 from Standby to Active within the holdtime, and the virtual gateway keeps answering (100% ping to the VIP through the failure). Restoring R2 triggers preemption — because preempt is enabled and R2's priority is higher, it reclaims Active and R3 steps back to Standby. Hosts on the segment keep the same default gateway throughout, never seeing which physical router is answering.
 
+- **End-to-end verification with a real exit code** — `verify_routing.py` checks all three layers on every device (OSPF neighbors FULL, floating statics present, HSRP role correct), prints a PASS/FAIL table, and exits 0 (healthy) or 1 (something's wrong). Expected values are derived from `inventory.yaml` — OSPF neighbor counts from the interface topology, HSRP roles from the group priorities — so nothing is hard-coded. Proven to catch real faults: shutting the R1–R2 link makes the check report `OSPF FAIL (1/2 neighbors)` on exactly the two affected routers and return exit 1, while the untouched R3 stays green. Restoring the link returns the whole board to pass / exit 0. The exit code is what makes it CI-gateable.
+
+## Lessons learned
+
+The problems worth remembering — most surfaced by the automation itself. Full detail in [NOTES.md](NOTES.md).
+
+- **An invalid /30 broadcast address hid behind a "successful" push.** The inventory assigned a router's inter-router link the `.3` address of a /30 — the broadcast address, which IOS silently rejects. The interface stayed unconfigured, OSPF never came up on it, and the idempotency check kept flagging that router on every run. The idempotency check doubled as a *correctness* check: a fire-and-forget script would have reported success forever and shipped a broken topology.
+
+- **`send_config_set` doesn't raise on a rejected command.** The device just prints a `%` line and moves on, so the bug above was invisible until a `find_ios_errors()` helper was added to scan the output and report `REJECTED` instead of a false `CONFIGURED`. A config-push tool that ignores device error output is lying to you.
+
+- **`no router ospf 1` is more destructive than it looks.** Removing the OSPF process also strips the per-interface `ip ospf` tags, so re-adding the process alone leaves a router with zero OSPF interfaces. Re-running the idempotent deploy detected the drift and repaired only the affected device — configuration enforcement in practice.
+
+- **In a /30, only 2 of the 4 addresses are usable.** Network and broadcast are off-limits. Obvious in hindsight; the source of a real outage in practice.
+
+- **Dual-active HSRP is an L2 diagnostic, not an HSRP bug.** If both routers think they're Active, they aren't hearing each other's hellos — a Layer 2 problem on the switch between them. HSRP state doubles as a connectivity check.
+
 ## Releases
 
 - **v0.1.0** — OSPF deployed and verified across all routers (end of Day 5)
 - **v0.2.0** — Floating static backup layer deployed and failover-tested (end of Day 6)
 - **v0.3.0** — HSRP first-hop redundancy deployed and failover-tested (end of Day 7)
+- **v1.0.0** — All three redundancy layers deployed, failover-tested, and validated end-to-end by a single health check (end of Day 8)
 
 ## License
 
-MIT — to be added on Day 8 alongside the v1.0 release.
+MIT — see [LICENSE](LICENSE).
