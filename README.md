@@ -12,7 +12,7 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
 - Day 4 — `configure_ospf.py` (single-device OSPF push) ✓
 - Day 5 — `configure_ospf_multi.py` (parallel, idempotent across all routers) ✓
 - Day 6 — `configure_floating_routes.py` (AD 120 backup paths) ✓
-- Day 7 — `configure_hsrp.py` (first-hop redundancy) *(planned)*
+- Day 7 — `configure_hsrp.py` (first-hop redundancy) ✓
 - Day 8 — `verify_routing.py` + comprehensive documentation *(planned)*
 
 ## Architecture
@@ -39,7 +39,7 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
     R1-R2 link: 10.0.12.0/30 (R1=.1, R2=.2)
     R1-R3 link: 10.0.13.0/30 (R1=.1, R3=.2)
     R2-R3 link: 10.0.23.0/30 (R2=.2, R3=.1)
-  HSRP segment: 192.168.10.0/24 (planned, Day 7)
+  HSRP segment: 192.168.10.0/24 — R2 Active (pri 110), R3 Standby (pri 100), VIP .1
   Loopbacks:    R1 = 1.1.1.1, R2 = 2.2.2.2, R3 = 3.3.3.3
 ```
 
@@ -73,6 +73,7 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
 | `configure_ospf.py` | Single-device OSPF push to R1 — proof of concept (Day 4) |
 | `configure_ospf_multi.py` | Parallel, idempotent OSPF deployment across all routers (Day 5) |
 | `configure_floating_routes.py` | Parallel, idempotent floating static routes — AD 120 OSPF backup (Day 6) |
+| `configure_hsrp.py` | Parallel, idempotent HSRP first-hop redundancy — R2 Active / R3 Standby (Day 7) |
 | `requirements.txt` | Pinned Python dependencies |
 | `.gitignore` | venv and bytecode exclusions |
 | `NOTES.md` | Engineering journal — design choices, gotchas, lessons |
@@ -99,7 +100,7 @@ Built as a portfolio project against a Cisco Modeling Labs (CML) topology of thr
    show ip route ospf         # learned O routes to 2.2.2.2 and 3.3.3.3
    ```
 
-Day 7 onward adds HSRP (first-hop redundancy) and end-to-end verification.
+Day 8 ties all three layers into a single automated health check (`verify_routing.py`) with proper exit codes, plus the final documentation pass and v1.0.0 release.
 
 ## Verified behaviors
 
@@ -111,10 +112,13 @@ This project is tested against real failures, not just deployed once and assumed
 
 - **Drift detection & self-healing** — the failover demo surfaced a real operational gotcha: `no router ospf 1` also strips the per-interface `ip ospf` tags, so re-adding the OSPF process alone does not fully restore a router (R2's process came back with zero interfaces and no adjacencies). The fix was to re-run `configure_ospf_multi.py`: the idempotency check detected that **only R2** had drifted from its desired state, reconfigured just R2 (`CONFIGURED - 20 commands sent`), and left R1 and R3 untouched (`OK - no changes`). The same "check, then change" logic that makes deployments safe also makes recovery safe — the tool is both a deployer and a targeted repair mechanism.
 
+- **First-hop failover (HSRP)** — on the 192.168.10.0/24 segment, R2 (priority 110) is Active and R3 (priority 100) is Standby, sharing virtual gateway 192.168.10.1. Exactly one router is Active — confirming R2 and R3 exchange HSRP hellos through the transparent-L2 SW1. Shutting the Active router's interface promotes R3 from Standby to Active within the holdtime, and the virtual gateway keeps answering (100% ping to the VIP through the failure). Restoring R2 triggers preemption — because preempt is enabled and R2's priority is higher, it reclaims Active and R3 steps back to Standby. Hosts on the segment keep the same default gateway throughout, never seeing which physical router is answering.
+
 ## Releases
 
 - **v0.1.0** — OSPF deployed and verified across all routers (end of Day 5)
 - **v0.2.0** — Floating static backup layer deployed and failover-tested (end of Day 6)
+- **v0.3.0** — HSRP first-hop redundancy deployed and failover-tested (end of Day 7)
 
 ## License
 

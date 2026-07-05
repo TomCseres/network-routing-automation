@@ -312,3 +312,43 @@ Fix: re-ran `configure_ospf_multi.py`. The idempotency check found that only R2'
 The floating static and the OSPF route here share the same next-hop (10.0.12.2, the direct R1-R2 link). So this backup covers a control-plane / protocol failure over an intact physical path — OSPF dies, the link is fine, the static keeps forwarding. That's a different failure domain from physical-path redundancy (where the backup uses a different link entirely). Worth naming the distinction: this design protects against OSPF/process failure, not against the R1-R2 cable going down.
 
 **Lesson:** know which failure your redundancy actually covers. Same-next-hop floating statics protect the control plane; protecting against a link failure needs a backup that routes over a different physical path.
+
+---
+
+## Day 7 — HSRP First-Hop Redundancy + Failover Demo
+
+### The virtual IP / virtual MAC model — the gateway belongs to the group
+
+HSRP's core idea: hosts point their default gateway at a virtual IP (192.168.10.1) that isn't owned by any physical interface. It belongs to the HSRP group, and whichever router is Active answers ARP for it with a virtual MAC (0000.0c07.ac0a for group 10 — the last octet is the group number in hex). When the Active router fails, the new Active sends a gratuitous ARP so the switched segment relearns that MAC on the new port. The host's ARP entry stays valid; it never changes its gateway setting.
+
+**Lesson:** first-hop redundancy works by decoupling the gateway address from any one router. The abstraction (a virtual IP + virtual MAC that migrates) is what lets the physical router change underneath a host without the host noticing.
+
+### Priority and preempt are two separate levers
+
+Priority decides who becomes Active (higher wins — R2 at 110 beats R3 at 100). Preempt decides whether a recovered higher-priority router reclaims Active. They're independent: without preempt, a rebooted R2 would come back and sit as Standby, leaving R3 Active indefinitely even though R2 has the higher priority. With preempt, R2 takes its job back the moment it returns. The demo showed both — R3 taking over on failure (priority-driven succession) and R2 reclaiming on recovery (preempt-driven).
+
+**Lesson:** "who should be primary" and "should the primary take its role back after recovering" are two different decisions. Preempt is the one people forget, and its absence is why a failover sometimes never fails back.
+
+### Exactly one Active is a health signal — dual-active means broken L2
+
+When HSRP came up, R2 showed Active and R3 showed Standby, each correctly identifying the other. That "exactly one Active" outcome is itself a test: it proves R2 and R3 are exchanging HSRP hellos across the segment through SW1 (the transparent L2 switch). If both had shown Active ("dual active"), it would mean the hellos aren't crossing — a Layer 2 problem on SW1 (ports down or in different VLANs), not an HSRP misconfiguration.
+
+**Lesson:** HSRP state doubles as an L2 connectivity check. Dual-active isn't an HSRP bug — it's HSRP correctly reporting that the two routers can't hear each other. Read the symptom for what it actually indicates.
+
+### The failover round trip: Active -> Standby-promoted -> Active-preempts-back
+
+Verified the full cycle on the 192.168.10.1 gateway. Healthy: R2 Active, R3 Standby. Shut R2's Ethernet0/2: after the ~10s holdtime, R3 promoted itself Standby -> Active and a ping to the VIP stayed at 100%. Restore R2's interface: preempt kicked in, R2 reclaimed Active, R3 dropped back to Standby. The gateway IP answered throughout; only the physical router behind it changed.
+
+**Lesson:** as with the Day 6 routing failover, the value is in showing the round trip both ways with traffic flowing — not just configuring HSRP and trusting it. The 100% ping to the VIP while the Active router was down is the proof that the redundancy is real.
+
+### HSRP failover takes a holdtime; it isn't instant
+
+R3 didn't take over the instant R2's interface went down — it waited out the HSRP holdtime (~10s with default hello 3s / hold 10s) before declaring R2 gone and promoting itself. That delay is correct, deliberate behavior: it prevents flapping on a brief blip. Watching `show standby brief` transition Standby -> Active in real time made the timer visible.
+
+**Lesson:** failover mechanisms trade detection speed for stability. The holdtime is a feature, not lag. If sub-second failover were required, you'd tune the timers (or use a faster protocol) — and accept the higher risk of flapping.
+
+### HSRP protects a different failure domain than the routing layers
+
+OSPF and the floating statics protect the routing path between routers. HSRP protects the first hop — the gateway a host talks to. They're independent layers covering different failures: a host with a dead gateway can't send anything regardless of how healthy OSPF is upstream, and a perfectly reachable gateway is useless if the routing behind it has no path. This project layers all three: dynamic routing (OSPF), a routing backup (floating statics), and a gateway backup (HSRP).
+
+**Lesson:** redundancy isn't one thing. "The network is redundant" means naming which failures are covered at which layer. First-hop redundancy and path redundancy are different problems with different solutions, and a resilient design needs both.
